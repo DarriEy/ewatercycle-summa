@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+
+# Test data (downloaded via scripts/setup_test_domain.sh)
+test_parameter_set/
+
+# Virtual environments
+venv/
