@@ -27,6 +27,13 @@ classifiers = [
 dependencies = [
   "ewatercycle>=2.1.0",
 ]
+
+[project.optional-dependencies]
+generate = [
+  "symfluence",
+  "geopandas",
+  "rasterstats",
+]
 dynamic = ["version"]
 
 [project.entry-points."ewatercycle.models"]
