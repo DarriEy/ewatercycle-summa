@@ -46,6 +46,8 @@ def create_parameter_set(
     start_time: str,
     end_time: str,
     output_dir: str | Path,
+    soil_raster: str | Path | None = None,
+    landclass_raster: str | Path | None = None,
     hru_id_col: str = "HRU_ID",
     gru_id_col: str = "GRU_ID",
     data_step: int = 3600,
@@ -64,6 +66,10 @@ def create_parameter_set(
         start_time: Simulation start time (YYYY-MM-DD HH:MM).
         end_time: Simulation end time (YYYY-MM-DD HH:MM).
         output_dir: Where to write the parameter set.
+        soil_raster: Path to soil class raster (USDA classes, 1-12).
+            If not provided, defaults to loam everywhere.
+        landclass_raster: Path to land cover raster (IGBP classes, 1-17).
+            If not provided, defaults to evergreen needleleaf.
         hru_id_col: Column name for HRU IDs in shapefile.
         gru_id_col: Column name for GRU IDs in shapefile.
         data_step: Forcing timestep in seconds (default 3600).
@@ -104,6 +110,8 @@ def create_parameter_set(
     _create_attributes(
         shapefile, dem, forcing_dir, settings_dir,
         hru_id_col, gru_id_col, measurement_height,
+        soil_raster=Path(soil_raster) if soil_raster else None,
+        landclass_raster=Path(landclass_raster) if landclass_raster else None,
     )
 
     _create_cold_state(
@@ -166,11 +174,17 @@ def _create_attributes(
     hru_id_col: str,
     gru_id_col: str,
     measurement_height: float,
+    soil_raster: Path | None = None,
+    landclass_raster: Path | None = None,
 ):
     """Create attributes.nc from shapefile and DEM."""
     project_dir = settings_dir.parent.parent
 
-    _ensure_intersections(shapefile, dem, project_dir, hru_id_col)
+    _ensure_intersections(
+        shapefile, dem, project_dir, hru_id_col,
+        soil_raster=soil_raster,
+        landclass_raster=landclass_raster,
+    )
 
     from symfluence.models.summa.attributes_manager import SummaAttributesManager
 
@@ -194,33 +208,79 @@ def _create_attributes(
 
 
 def _ensure_intersections(
-    shapefile: Path, dem: Path, project_dir: Path, hru_id_col: str,
+    shapefile: Path,
+    dem: Path,
+    project_dir: Path,
+    hru_id_col: str,
+    soil_raster: Path | None = None,
+    landclass_raster: Path | None = None,
 ):
-    """Create minimal intersection shapefiles from the catchment shapefile.
+    """Create intersection shapefiles from raster data.
 
     The SYMFLUENCE attributes manager expects pre-computed intersection
-    shapefiles. If they don't exist, we create minimal versions using
-    the shapefile's own columns (elev_mean, etc.) or DEM zonal stats.
+    shapefiles with specific column formats:
+      - with_dem/: elev_mean column
+      - with_soilgrids/: USGS_0..USGS_12 columns (area fractions)
+      - with_landclass/: IGBP_1..IGBP_17 columns (area fractions)
     """
     import geopandas as gpd
+    from rasterstats import zonal_stats
 
     gdf = gpd.read_file(shapefile)
     intersect_base = project_dir / "shapefiles" / "catchment_intersection"
 
+    # -- Elevation --
     dem_dir = intersect_base / "with_dem"
     dem_file = dem_dir / "catchment_with_dem.shp"
     if not dem_file.exists():
         dem_dir.mkdir(parents=True, exist_ok=True)
         dem_gdf = gdf.copy()
         if "elev_mean" not in dem_gdf.columns:
-            if dem.exists():
-                from rasterstats import zonal_stats
+            if dem.exists() and dem.stat().st_size > 0:
                 stats = zonal_stats(dem_gdf, str(dem), stats=["mean"])
                 dem_gdf["elev_mean"] = [s["mean"] or 0 for s in stats]
             else:
                 dem_gdf["elev_mean"] = 1000.0
         dem_gdf.to_file(dem_file)
         logger.info("Created DEM intersection from shapefile")
+
+    # -- Soil class --
+    soil_dir = intersect_base / "with_soilgrids"
+    soil_file = soil_dir / "catchment_with_soilclass.shp"
+    if not soil_file.exists() and soil_raster is not None and soil_raster.exists():
+        soil_dir.mkdir(parents=True, exist_ok=True)
+        soil_gdf = gdf.copy()
+        stats = zonal_stats(soil_gdf, str(soil_raster), categorical=True)
+        for i in range(13):
+            col = f"USGS_{i}"
+            soil_gdf[col] = 0.0
+        for idx, row_stats in enumerate(stats):
+            total = sum(v for k, v in row_stats.items() if k is not None)
+            if total > 0:
+                for class_id, count in row_stats.items():
+                    if class_id is not None and 0 <= int(class_id) <= 12:
+                        soil_gdf.loc[idx, f"USGS_{int(class_id)}"] = count / total
+        soil_gdf.to_file(soil_file)
+        logger.info("Created soil class intersection from raster")
+
+    # -- Land cover --
+    land_dir = intersect_base / "with_landclass"
+    land_file = land_dir / "catchment_with_landclass.shp"
+    if not land_file.exists() and landclass_raster is not None and landclass_raster.exists():
+        land_dir.mkdir(parents=True, exist_ok=True)
+        land_gdf = gdf.copy()
+        stats = zonal_stats(land_gdf, str(landclass_raster), categorical=True)
+        for i in range(1, 18):
+            col = f"IGBP_{i}"
+            land_gdf[col] = 0.0
+        for idx, row_stats in enumerate(stats):
+            total = sum(v for k, v in row_stats.items() if k is not None)
+            if total > 0:
+                for class_id, count in row_stats.items():
+                    if class_id is not None and 1 <= int(class_id) <= 17:
+                        land_gdf.loc[idx, f"IGBP_{int(class_id)}"] = count / total
+        land_gdf.to_file(land_file)
+        logger.info("Created land cover intersection from raster")
 
 
 def _create_cold_state(
