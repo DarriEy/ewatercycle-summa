@@ -115,7 +115,7 @@ class SUMMA(ContainerizedModel, SUMMAMethods):
     """
 
     bmi_image: ContainerImage = ContainerImage(
-        "ghcr.io/ewatercycle/summa-grpc4bmi:v0.1.0"
+        "ghcr.io/darriey/summa-grpc4bmi:v0.1.0"
     )
 
     @property
