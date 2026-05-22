@@ -76,6 +76,10 @@ class SUMMAMethods(eWaterCycleModel):
 
         cfg["outputPath"] = str(self._cfg_dir) + "/"
 
+        forcing_path = Path(cfg.get("forcingPath", "").rstrip("/"))
+        if forcing_path.is_dir() and str(forcing_path) not in self._additional_input_dirs:
+            self._additional_input_dirs.append(str(forcing_path))
+
         if "start_time" in kwargs:
             cfg["simStartTime"] = kwargs["start_time"]
         elif self.forcing is not None:

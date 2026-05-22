@@ -28,14 +28,50 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _import_symfluence_class(module_path: str, class_name: str):
+    """Import a class from SYMFLUENCE by loading the .py file directly.
+
+    Avoids triggering SYMFLUENCE's full __init__.py import chain which
+    pulls in 20+ model packages and heavy dependencies.
+    """
+    import importlib.util
+    import sys
+
+    if module_path in sys.modules:
+        return getattr(sys.modules[module_path], class_name)
+
+    spec = importlib.util.find_spec(module_path)
+    if spec is None or spec.origin is None:
+        raise ImportError(f"Cannot find {module_path}")
+
+    # Ensure parent packages exist as namespace stubs
+    parts = module_path.split(".")
+    for i in range(1, len(parts)):
+        parent = ".".join(parts[:i])
+        if parent not in sys.modules:
+            sys.modules[parent] = type(sys)(parent)
+            sys.modules[parent].__path__ = []
+            parent_spec = importlib.util.find_spec(parent)
+            if parent_spec and parent_spec.submodule_search_locations:
+                sys.modules[parent].__path__ = list(parent_spec.submodule_search_locations)
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_path] = module
+    spec.loader.exec_module(module)
+    return getattr(module, class_name)
+
+
 def _check_symfluence():
-    try:
-        import symfluence  # noqa: F401
-    except ImportError:
-        raise ImportError(
-            "symfluence is required for parameter set generation. "
-            "Install it with: pip install symfluence"
-        )
+    """Verify SYMFLUENCE source is available without triggering full import chain."""
+    import importlib.util
+    for mod in ["symfluence.models.summa.attributes_manager",
+                "symfluence.models.summa.config_manager"]:
+        spec = importlib.util.find_spec(mod)
+        if spec is None:
+            raise ImportError(
+                "symfluence is required for parameter set generation. "
+                "Install it with: pip install symfluence"
+            )
 
 
 def create_parameter_set(
@@ -101,7 +137,6 @@ def create_parameter_set(
     forcing_out.mkdir(parents=True, exist_ok=True)
 
     _copy_base_settings(settings_dir)
-    _create_forcing_link(forcing_dir, forcing_out)
     _create_forcing_file_list(forcing_dir, settings_dir)
 
     if decisions:
@@ -121,7 +156,7 @@ def create_parameter_set(
     _create_trial_params(forcing_dir, settings_dir, hru_id_col)
 
     _create_file_manager(
-        settings_dir, forcing_out, output,
+        settings_dir, forcing_dir, output,
         domain_name, start_time, end_time,
     )
 
@@ -186,8 +221,9 @@ def _create_attributes(
         landclass_raster=landclass_raster,
     )
 
-    from symfluence.models.summa.attributes_manager import SummaAttributesManager
-
+    SummaAttributesManager = _import_symfluence_class(
+        "symfluence.models.summa.attributes_manager", "SummaAttributesManager"
+    )
     manager = SummaAttributesManager(
         config={},
         logger=logger,
@@ -290,8 +326,9 @@ def _create_cold_state(
     soil_profile: str,
 ):
     """Create coldState.nc (initial conditions)."""
-    from symfluence.models.summa.config_manager import SummaConfigManager
-
+    SummaConfigManager = _import_symfluence_class(
+        "symfluence.models.summa.config_manager", "SummaConfigManager"
+    )
     manager = SummaConfigManager(
         config={"SETTINGS_SUMMA_SOILPROFILE": soil_profile},
         logger=logger,
@@ -319,8 +356,9 @@ def _create_trial_params(
     hru_id_col: str,
 ):
     """Create trialParams.nc."""
-    from symfluence.models.summa.config_manager import SummaConfigManager
-
+    SummaConfigManager = _import_symfluence_class(
+        "symfluence.models.summa.config_manager", "SummaConfigManager"
+    )
     manager = SummaConfigManager(
         config={},
         logger=logger,
@@ -360,7 +398,7 @@ def _create_file_manager(
         "tmZoneInfo": "utcTime",
         "outFilePrefix": experiment_id,
         "settingsPath": str(settings_dir) + "/",
-        "forcingPath": str(forcing_dir) + "/",
+        "forcingPath": str(forcing_dir.resolve()) + "/",
         "outputPath": str(output_dir / "output") + "/",
         "decisionsFile": "modelDecisions.txt",
         "outputControlFile": "outputControl.txt",
