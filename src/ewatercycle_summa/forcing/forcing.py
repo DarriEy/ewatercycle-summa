@@ -21,7 +21,7 @@ class SUMMAForcing(DefaultForcing):
         forcing_file: Name of the forcing NetCDF file within directory.
     """
 
-    forcing_file: str = "forcing.nc"
+    forcing_file: str = "summa_forcing.nc"
 
     @classmethod
     def generate(
@@ -34,17 +34,15 @@ class SUMMAForcing(DefaultForcing):
     ) -> "SUMMAForcing":
         """Generate forcing data for SUMMA.
 
-        Uses ESMValTool to download and process forcing variables.
+        Uses ESMValTool to download and process meteorological forcing, then
+        converts to SUMMA's required format (variable names, units, dimensions).
 
         Args:
-            dataset: Dataset to get forcing data from. When string is given a
-                predefined dataset is looked up in
-                :py:const:`ewatercycle.esmvaltool.datasets.DATASETS`.
+            dataset: Dataset to get forcing data from.
             start_time: Start time of forcing in UTC and ISO format string.
             end_time: End time of forcing in UTC and ISO format string.
             shape: Path to a shape file. Used for spatial selection.
             directory: Directory in which forcing should be written.
-                If not given will create timestamped directory.
         """
         return super().generate(
             dataset=dataset,
@@ -71,6 +69,10 @@ class SUMMAForcing(DefaultForcing):
             .end(end_time.year)
             .shape(shape)
             .add_variables(["tas", "pr", "rsds", "rlds", "huss", "sfcWind", "ps"])
+            .script(
+                str(Path(__file__).parent / "diagnostic_script.py"),
+                {"basin": shape.stem},
+            )
             .build()
         )
 

@@ -1,17 +1,20 @@
-"""Subprocess-based BMI wrapper for SUMMA.
+"""Restart-based subprocess BMI wrapper for SUMMA.
 
-Runs the standard SUMMA executable as a subprocess and exposes results
-through the BMI interface. The full simulation is run on the first
-update() call; subsequent update() calls advance through the output
-timesteps.
+Each update() call runs SUMMA for one output timestep, using restart files
+to chain state between steps. This gives true BMI time-stepping: get_value()
+returns the state at the current time, and the model can be advanced
+incrementally.
 
-This avoids all Fortran ABI issues with the NGEN-BMI and works with
-any standard SUMMA domain configuration.
+The wrapper manages fileManager.txt rewriting, restart file chaining,
+and output collection across steps.
 """
 
 import logging
 import os
+import re
+import shutil
 import subprocess
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Tuple
 
@@ -21,147 +24,192 @@ from bmipy import Bmi
 
 logger = logging.getLogger(__name__)
 
-SUMMA_EXE = os.environ.get("SUMMA_EXE", "summa_sundials.exe")
+SUMMA_EXE = os.environ.get("SUMMA_EXE", "summa.exe")
+
+
+def _parse_fm(path: str) -> dict:
+    config = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("!"):
+                continue
+            m = re.match(r"(\S+)\s+'([^']*)'", line)
+            if m:
+                config[m.group(1)] = m.group(2)
+    return config
+
+
+def _write_fm(config: dict, path: str) -> None:
+    with open(path, "w") as f:
+        for k, v in config.items():
+            f.write(f"{k:<20} '{v}'\n")
+
+
+def _parse_time(s: str) -> datetime:
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"Cannot parse time: {s!r}")
+
+
+def _fmt_time(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 class SummaBmi(Bmi):
-    """Subprocess BMI wrapper for SUMMA."""
+    """Restart-based subprocess BMI for SUMMA.
+
+    Each update() runs SUMMA for one forcing timestep, writes a restart
+    file, and reads the output. The restart file becomes the initial
+    condition for the next step.
+    """
 
     def __init__(self):
-        self._config_file: str | None = None
-        self._output_ds: nc.Dataset | None = None
-        self._time_index: int = 0
-        self._n_times: int = 0
-        self._n_hru: int = 0
-        self._start_time: float = 0.0
-        self._end_time: float = 0.0
-        self._time_step: float = 3600.0
-        self._times: np.ndarray | None = None
-        self._has_run: bool = False
-        self._output_path: Path | None = None
-        self._output_prefix: str = ""
+        self._config: dict = {}
+        self._config_file: str = ""
+        self._work_dir: Path = Path(".")
+
+        self._current_time: datetime = datetime(2000, 1, 1)
+        self._start_time: datetime = datetime(2000, 1, 1)
+        self._end_time: datetime = datetime(2000, 1, 2)
+        self._time_step: timedelta = timedelta(hours=1)
+        self._time_step_seconds: float = 3600.0
+
+        self._n_hru: int = 1
+        self._step_count: int = 0
+        self._initialized: bool = False
+
+        self._current_output: nc.Dataset | None = None
+        self._restart_file: str = "coldState.nc"
 
     def initialize(self, config_file: str) -> None:
         self._config_file = config_file
-        self._parse_file_manager(config_file)
+        self._config = _parse_fm(config_file)
+        self._work_dir = Path(config_file).parent
 
-    def _parse_file_manager(self, path: str) -> None:
-        """Parse fileManager.txt to extract paths and simulation times."""
-        import re
-        config = {}
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("!"):
-                    continue
-                m = re.match(r"(\S+)\s+'([^']*)'", line)
-                if m:
-                    config[m.group(1)] = m.group(2)
+        self._start_time = _parse_time(self._config["simStartTime"])
+        self._end_time = _parse_time(self._config["simEndTime"])
+        self._current_time = self._start_time
 
-        self._output_path = Path(config.get("outputPath", ".").rstrip("/"))
-        self._output_prefix = config.get("outFilePrefix", "summa_output")
+        self._restart_file = self._config.get("initConditionFile", "coldState.nc")
 
-        start_str = config.get("simStartTime", "")
-        end_str = config.get("simEndTime", "")
-        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-            try:
-                from datetime import datetime
-                self._start_dt = datetime.strptime(start_str, fmt)
-                self._end_dt = datetime.strptime(end_str, fmt)
-                break
-            except ValueError:
-                continue
-
-        settings_path = Path(config.get("settingsPath", "").rstrip("/"))
-        attr_file = settings_path / config.get("attributeFile", "attributes.nc")
+        settings_path = Path(self._config.get("settingsPath", "").rstrip("/"))
+        attr_file = settings_path / self._config.get("attributeFile", "attributes.nc")
         if attr_file.exists():
             with nc.Dataset(str(attr_file)) as ds:
-                self._n_hru = len(ds.dimensions.get("hru", []))
+                self._n_hru = len(ds.dimensions.get("hru", [1]))
 
-        self._start_time = 0.0
-        dt = self._end_dt - self._start_dt
-        self._end_time = dt.total_seconds()
+        forcing_path = Path(self._config.get("forcingPath", "").rstrip("/"))
+        forcing_list = settings_path / self._config.get("forcingListFile", "forcingFileList.txt")
+        self._time_step = self._detect_timestep(forcing_path, forcing_list)
+        self._time_step_seconds = self._time_step.total_seconds()
 
-    def _run_summa(self) -> None:
-        """Execute SUMMA as a subprocess."""
-        if self._has_run:
-            return
+        self._initialized = True
+        logger.info(
+            "SUMMA initialized: %s -> %s, dt=%s, %d HRU(s)",
+            self._start_time, self._end_time, self._time_step, self._n_hru,
+        )
 
-        logger.info("Running SUMMA: %s -m %s", SUMMA_EXE, self._config_file)
+    def _detect_timestep(self, forcing_path: Path, forcing_list: Path) -> timedelta:
+        """Detect the forcing timestep from the first forcing file."""
+        files = []
+        if forcing_list.exists():
+            with forcing_list.open() as f:
+                for line in f:
+                    fname = line.strip()
+                    if fname and not fname.startswith("!"):
+                        fpath = forcing_path / fname
+                        if fpath.exists():
+                            files.append(fpath)
+                            break
+        if not files:
+            files = sorted(forcing_path.glob("*.nc"))[:1]
+        if not files:
+            return timedelta(hours=1)
+
+        with nc.Dataset(str(files[0])) as ds:
+            if "data_step" in ds.variables:
+                return timedelta(seconds=int(ds.variables["data_step"][:]))
+            if "time" in ds.variables and len(ds.variables["time"]) > 1:
+                import cftime
+                tv = ds.variables["time"]
+                dates = cftime.num2date(
+                    tv[:2], units=tv.units,
+                    calendar=getattr(tv, "calendar", "standard"),
+                )
+                return timedelta(seconds=(dates[1] - dates[0]).total_seconds())
+        return timedelta(hours=1)
+
+    def _run_step(self) -> None:
+        """Run SUMMA for one timestep using restart chaining."""
+        step_start = self._current_time
+        step_end = self._current_time + self._time_step
+
+        step_dir = self._work_dir / f"step_{self._step_count:06d}"
+        step_dir.mkdir(exist_ok=True)
+
+        step_config = dict(self._config)
+        step_config["simStartTime"] = _fmt_time(step_start)
+        step_config["simEndTime"] = _fmt_time(step_end)
+        step_config["outFilePrefix"] = f"step_{self._step_count:06d}"
+        step_config["outputPath"] = str(step_dir) + "/"
+        step_config["initConditionFile"] = self._restart_file
+
+        step_fm = str(step_dir / "fileManager.txt")
+        _write_fm(step_config, step_fm)
 
         env = dict(os.environ)
-        libftz = Path(SUMMA_EXE).parent / "libftz.so"
-        if libftz.exists():
+        exe_path = Path(SUMMA_EXE)
+        libftz = exe_path.parent / "libftz.so"
+        if libftz.exists() and libftz.stat().st_size > 0:
             existing = env.get("LD_PRELOAD", "")
             env["LD_PRELOAD"] = f"{libftz}:{existing}" if existing else str(libftz)
 
         result = subprocess.run(
-            [SUMMA_EXE, "-m", self._config_file],
-            capture_output=True,
-            text=True,
-            env=env,
+            [SUMMA_EXE, "-m", step_fm],
+            capture_output=True, text=True, env=env,
         )
 
         if result.returncode != 0:
-            logger.error("SUMMA failed:\n%s\n%s", result.stdout, result.stderr)
+            logger.error("SUMMA step %d failed:\n%s", self._step_count, result.stderr[-1000:])
             raise RuntimeError(
-                f"SUMMA exited with code {result.returncode}: {result.stderr[-500:]}"
+                f"SUMMA step {self._step_count} failed (code {result.returncode}): "
+                f"{result.stderr[-300:]}"
             )
 
-        logger.info("SUMMA completed successfully")
-        self._has_run = True
-        self._open_output()
+        if self._current_output is not None:
+            self._current_output.close()
 
-    def _open_output(self) -> None:
-        """Open the SUMMA output NetCDF file."""
-        pattern = f"{self._output_prefix}_output_*_timestep.nc"
-        candidates = sorted(self._output_path.glob(pattern))
-        if not candidates:
-            pattern2 = f"{self._output_prefix}*.nc"
-            candidates = sorted(self._output_path.glob(pattern2))
-        if not candidates:
-            all_nc = sorted(self._output_path.glob("*.nc"))
-            raise FileNotFoundError(
-                f"No SUMMA output found in {self._output_path}. "
-                f"Files: {[f.name for f in all_nc]}"
-            )
+        out_files = sorted(step_dir.glob("*.nc"))
+        restart_files = [f for f in out_files if "restart" in f.name]
+        output_files = [f for f in out_files if "restart" not in f.name]
 
-        self._output_ds = nc.Dataset(str(candidates[0]), "r")
-        self._times = self._output_ds.variables["time"][:]
-        self._n_times = len(self._times)
-        self._n_hru = len(self._output_ds.dimensions.get("hru", [1]))
+        if restart_files:
+            self._restart_file = str(restart_files[-1])
 
-        if self._n_times > 1:
-            time_var = self._output_ds.variables["time"]
-            import cftime
-            dates = cftime.num2date(
-                self._times[:2],
-                units=time_var.units,
-                calendar=getattr(time_var, "calendar", "standard"),
-            )
-            dt = (dates[1] - dates[0]).total_seconds()
-            self._time_step = dt
+        if output_files:
+            self._current_output = nc.Dataset(str(output_files[0]), "r")
+        else:
+            self._current_output = None
 
-        self._end_time = self._n_times * self._time_step
-        logger.info(
-            "Output: %d timesteps, %d HRUs, dt=%.0fs",
-            self._n_times, self._n_hru, self._time_step,
-        )
+        self._current_time = step_end
+        self._step_count += 1
 
     def update(self) -> None:
-        self._run_summa()
-        if self._time_index < self._n_times:
-            self._time_index += 1
+        self._run_step()
 
     def update_until(self, time: float) -> None:
-        self._run_summa()
-        while self.get_current_time() < time and self._time_index < self._n_times:
-            self._time_index += 1
+        target = self._start_time + timedelta(seconds=time)
+        while self._current_time < target and self._current_time < self._end_time:
+            self._run_step()
 
     def finalize(self) -> None:
-        if self._output_ds is not None:
-            self._output_ds.close()
-            self._output_ds = None
+        if self._current_output is not None:
+            self._current_output.close()
+            self._current_output = None
 
     # -- Info --
 
@@ -172,33 +220,33 @@ class SummaBmi(Bmi):
         return 0
 
     def get_output_item_count(self) -> int:
-        if self._output_ds is None:
+        if self._current_output is None:
             return 0
         skip = {"time", "hruId", "gruId", "latitude", "longitude"}
-        return sum(1 for v in self._output_ds.variables if v not in skip)
+        return sum(1 for v in self._current_output.variables if v not in skip)
 
     def get_input_var_names(self) -> Tuple[str, ...]:
         return ()
 
     def get_output_var_names(self) -> Tuple[str, ...]:
-        if self._output_ds is None:
+        if self._current_output is None:
             return ()
         skip = {"time", "hruId", "gruId", "latitude", "longitude"}
-        return tuple(v for v in self._output_ds.variables if v not in skip)
+        return tuple(v for v in self._current_output.variables if v not in skip)
 
     # -- Time --
 
     def get_current_time(self) -> float:
-        return self._time_index * self._time_step
+        return (self._current_time - self._start_time).total_seconds()
 
     def get_start_time(self) -> float:
-        return self._start_time
+        return 0.0
 
     def get_end_time(self) -> float:
-        return self._end_time
+        return (self._end_time - self._start_time).total_seconds()
 
     def get_time_step(self) -> float:
-        return self._time_step
+        return self._time_step_seconds
 
     def get_time_units(self) -> str:
         return "s"
@@ -206,8 +254,8 @@ class SummaBmi(Bmi):
     # -- Variable info --
 
     def get_var_type(self, name: str) -> str:
-        if self._output_ds and name in self._output_ds.variables:
-            dtype = self._output_ds.variables[name].dtype
+        if self._current_output and name in self._current_output.variables:
+            dtype = self._current_output.variables[name].dtype
             if dtype == np.float64:
                 return "float64"
             if dtype == np.float32:
@@ -217,13 +265,13 @@ class SummaBmi(Bmi):
         return "float64"
 
     def get_var_units(self, name: str) -> str:
-        if self._output_ds and name in self._output_ds.variables:
-            return getattr(self._output_ds.variables[name], "units", "-")
+        if self._current_output and name in self._current_output.variables:
+            return getattr(self._current_output.variables[name], "units", "-")
         return "-"
 
     def get_var_itemsize(self, name: str) -> int:
-        if self._output_ds and name in self._output_ds.variables:
-            return self._output_ds.variables[name].dtype.itemsize
+        if self._current_output and name in self._current_output.variables:
+            return self._current_output.variables[name].dtype.itemsize
         return 8
 
     def get_var_nbytes(self, name: str) -> int:
@@ -257,13 +305,13 @@ class SummaBmi(Bmi):
         return origin
 
     def get_grid_x(self, grid: int, x: np.ndarray) -> np.ndarray:
-        if self._output_ds and "longitude" in self._output_ds.variables:
-            x[:] = self._output_ds.variables["longitude"][:]
+        if self._current_output and "longitude" in self._current_output.variables:
+            x[:] = self._current_output.variables["longitude"][:]
         return x
 
     def get_grid_y(self, grid: int, y: np.ndarray) -> np.ndarray:
-        if self._output_ds and "latitude" in self._output_ds.variables:
-            y[:] = self._output_ds.variables["latitude"][:]
+        if self._current_output and "latitude" in self._current_output.variables:
+            y[:] = self._current_output.variables["latitude"][:]
         return y
 
     def get_grid_z(self, grid: int, z: np.ndarray) -> np.ndarray:
@@ -278,31 +326,30 @@ class SummaBmi(Bmi):
     def get_grid_face_count(self, grid: int) -> int:
         return 0
 
-    def get_grid_edge_nodes(self, grid: int, edge_nodes: np.ndarray) -> np.ndarray:
-        return edge_nodes
+    def get_grid_edge_nodes(self, grid: int, en: np.ndarray) -> np.ndarray:
+        return en
 
-    def get_grid_face_edges(self, grid: int, face_edges: np.ndarray) -> np.ndarray:
-        return face_edges
+    def get_grid_face_edges(self, grid: int, fe: np.ndarray) -> np.ndarray:
+        return fe
 
-    def get_grid_face_nodes(self, grid: int, face_nodes: np.ndarray) -> np.ndarray:
-        return face_nodes
+    def get_grid_face_nodes(self, grid: int, fn: np.ndarray) -> np.ndarray:
+        return fn
 
-    def get_grid_nodes_per_face(self, grid: int, nodes_per_face: np.ndarray) -> np.ndarray:
-        return nodes_per_face
+    def get_grid_nodes_per_face(self, grid: int, npf: np.ndarray) -> np.ndarray:
+        return npf
 
     # -- Get/Set values --
 
     def get_value(self, name: str, dest: np.ndarray) -> np.ndarray:
-        self._run_summa()
-        if self._output_ds is None or name not in self._output_ds.variables:
+        if self._current_output is None or name not in self._current_output.variables:
             return dest
-        var = self._output_ds.variables[name]
-        idx = max(0, self._time_index - 1)
+        var = self._current_output.variables[name]
         if "time" in var.dimensions:
-            data = var[idx]
+            data = var[-1]
         else:
             data = var[:]
-        dest[: len(np.atleast_1d(data))] = np.atleast_1d(data).flatten()
+        flat = np.atleast_1d(data).flatten()
+        dest[: len(flat)] = flat
         return dest
 
     def get_value_ptr(self, name: str) -> np.ndarray:

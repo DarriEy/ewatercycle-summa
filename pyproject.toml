@@ -33,7 +33,7 @@ dynamic = ["version"]
 SUMMA = "ewatercycle_summa.model:SUMMA"
 
 [project.entry-points."ewatercycle.forcings"]
-SUMMAForcing = "ewatercycle_summa.forcing:SUMMAForcing"
+SUMMAForcing = "ewatercycle_summa.forcing.forcing:SUMMAForcing"
 
 [tool.ruff]
 target-version = "py310"

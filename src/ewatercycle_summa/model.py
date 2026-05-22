@@ -11,7 +11,7 @@ from ewatercycle.base.parameter_set import ParameterSet
 from ewatercycle.container import ContainerImage
 from pydantic import PrivateAttr, model_validator
 
-from ewatercycle_summa.forcing import SUMMAForcing
+from ewatercycle_summa.forcing.forcing import SUMMAForcing
 from ewatercycle_summa.utils import (
     parse_file_manager,
     parse_summa_time,

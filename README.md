@@ -2,7 +2,10 @@
 
 SUMMA (Structure for Unifying Multiple Modeling Alternatives) plugin for [eWaterCycle](https://ewatercycle.readthedocs.io/).
 
-Uses the SUMMA Fortran BMI from [CH-Earth/summa](https://github.com/CH-Earth/summa/tree/develop_sundials) served via [grpc4bmi](https://github.com/eWaterCycle/grpc4bmi) in a Docker container.
+Runs the standard SUMMA executable from [CH-Earth/summa](https://github.com/CH-Earth/summa/tree/develop_sundials)
+inside a Docker container via a subprocess BMI wrapper served by
+[grpc4bmi](https://github.com/eWaterCycle/grpc4bmi). Works with any existing
+SUMMA domain setup (e.g. from [SYMFLUENCE](https://github.com/DarriEy/SYMFLUENCE)).
 
 ## Installation
 
@@ -73,31 +76,17 @@ used as a starting point.
 
 ## Container
 
-The Docker image builds SUMMA from the `develop_sundials` branch with Fortran
-BMI support and exposes it via grpc4bmi:
+The Docker image builds standard SUMMA (with iterative solver) and wraps it
+via a Python subprocess BMI + grpc4bmi:
 
 ```bash
 cd container
 docker build -t ghcr.io/ewatercycle/summa-grpc4bmi:v0.1.0 .
 ```
 
-## SUMMA BMI Variables
-
-### Inputs (7 forcing variables)
-| CSDMS Standard Name | SUMMA Name | Units |
-|---|---|---|
-| `atmosphere_water__precipitation_mass_flux` | pptrate | mm s-1 |
-| `land_surface_air__temperature` | airtemp | K |
-| `atmosphere_air_water~vapor__relative_saturation` | spechum | kg kg-1 |
-| `land_surface_wind__speed` | windspd | m s-1 |
-| `land_surface_radiation~incoming~shortwave__energy_flux` | SWRadAtm | W m-2 |
-| `land_surface_radiation~incoming~longwave__energy_flux` | LWRadAtm | W m-2 |
-| `land_surface_air__pressure` | airpres | Pa |
-
-### Outputs (16 variables)
-Includes runoff, evaporation, transpiration, sublimation, baseflow, SWE, soil
-water, vegetation water, and energy balance fluxes. See `summa_bmi.f90` for the
-full list.
+The first `update()` call runs the full SUMMA simulation as a subprocess.
+Subsequent `update()` calls step through the output timesteps. All standard
+SUMMA output variables are available via `get_value()`.
 
 ## License
 
