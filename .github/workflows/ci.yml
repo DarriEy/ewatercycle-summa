@@ -92,7 +92,7 @@ jobs:
           pip install setuptools
           pip install --no-deps ewatercycle pyoos
           pip install bmipy grpc4bmi remotebmi pydantic xarray cftime netCDF4
-          pip install ruamel.yaml fsspec shapely fiona cartopy hydrostats
+          pip install ruamel.yaml fsspec shapely fiona cartopy hydrostats esmvalcore
           pip install -e . --no-deps
           pip install pytest numpy
 
