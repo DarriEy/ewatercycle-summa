@@ -80,7 +80,7 @@ class SUMMAMethods(eWaterCycleModel):
         if not forcing_path.is_absolute():
             forcing_path = (self.parameter_set.directory / forcing_path).resolve()
             cfg["forcingPath"] = str(forcing_path) + "/"
-        if forcing_path.is_dir() and str(forcing_path) not in self._additional_input_dirs:
+        if forcing_path.is_dir() and str(forcing_path) not in self._additional_input_dirs:  # noqa: E501
             self._additional_input_dirs.append(str(forcing_path))
 
         if "start_time" in kwargs:

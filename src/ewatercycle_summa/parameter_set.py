@@ -23,7 +23,6 @@ Usage:
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,9 @@ def _import_symfluence_class(module_path: str, class_name: str):
             sys.modules[parent].__path__ = []
             parent_spec = importlib.util.find_spec(parent)
             if parent_spec and parent_spec.submodule_search_locations:
-                sys.modules[parent].__path__ = list(parent_spec.submodule_search_locations)
+                sys.modules[parent].__path__ = list(
+                    parent_spec.submodule_search_locations
+                )
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_path] = module
@@ -302,7 +303,7 @@ def _ensure_intersections(
     # -- Land cover --
     land_dir = intersect_base / "with_landclass"
     land_file = land_dir / "catchment_with_landclass.shp"
-    if not land_file.exists() and landclass_raster is not None and landclass_raster.exists():
+    if not land_file.exists() and landclass_raster is not None and landclass_raster.exists():  # noqa: E501
         land_dir.mkdir(parents=True, exist_ok=True)
         land_gdf = gdf.copy()
         stats = zonal_stats(land_gdf, str(landclass_raster), categorical=True)
@@ -441,11 +442,6 @@ def acquire_attributes(
     """
     _check_symfluence()
 
-    from symfluence.geospatial.discretization.attributes import (
-        elevation as elev_module,
-        soilclass as soil_module,
-        landclass as land_module,
-    )
 
     shapefile = Path(shapefile)
     dem = Path(dem)
@@ -482,7 +478,9 @@ def acquire_attributes(
     if "landclass" in datasets:
         logger.info("Processing land cover classification...")
         try:
-            from symfluence.data.preprocessing.attribute_processors import LandCoverProcessor
+            from symfluence.data.preprocessing.attribute_processors import (
+                LandCoverProcessor,
+            )
             processor = LandCoverProcessor(
                 config={"SYMFLUENCE_DATA_DIR": str(output_dir.parent)},
                 logger=logger,

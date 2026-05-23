@@ -18,12 +18,10 @@ Variable mapping (CMOR -> SUMMA):
 """
 
 import logging
-import os
 from pathlib import Path
 
 import iris
 import numpy as np
-
 from esmvaltool.diag_scripts.shared import (
     ProvenanceLogger,
     group_metadata,
@@ -65,7 +63,6 @@ def _compute_data_step(cube: iris.cube.Cube) -> int:
     time_coord = cube.coord("time")
     if len(time_coord.points) < 2:
         return 3600
-    dt = time_coord.points[1] - time_coord.points[0]
     unit = time_coord.units
     t0 = unit.num2date(time_coord.points[0])
     t1 = unit.num2date(time_coord.points[1])
@@ -160,9 +157,12 @@ def main(cfg: dict):
 
         ds.Conventions = "CF-1.6"
         ds.model_format = "SUMMA"
-        ds.history = f"Created by ewatercycle-summa diagnostic script"
+        ds.history = "Created by ewatercycle-summa diagnostic script"
 
-    logger.info("Wrote SUMMA forcing: %s (%d times, %d HRUs)", output_path, n_times, n_hru)
+    logger.info(
+        "Wrote SUMMA forcing: %s (%d times, %d HRUs)",
+        output_path, n_times, n_hru,
+    )
 
     provenance = {
         "caption": f"SUMMA forcing for {basin}",
