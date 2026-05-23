@@ -9,27 +9,39 @@ SUMMA domain setup (e.g. from [SYMFLUENCE](https://github.com/DarriEy/SYMFLUENCE
 
 ## Installation
 
+`ewatercycle` depends on ESMValTool, which is only installable via conda. Set up a
+conda env from eWaterCycle's lock file, then pip-install this plugin on top:
+
 ```bash
+curl -o conda-lock.yml https://raw.githubusercontent.com/eWaterCycle/ewatercycle/main/conda-lock.yml
+conda-lock install --no-dev -n ewatercycle
+conda activate ewatercycle
 pip install ewatercycle-summa
 ```
+
+A plain `pip install ewatercycle-summa` into a non-conda venv will pull in
+`ewatercycle` from PyPI but fail at first import: `ewatercycle.base.forcing`
+loads ESMValTool diagnostic scripts at module load time.
+
+Docker must be running — the SUMMA container is pulled automatically on first use.
+
+## Quickstart
+
+The repository ships a bundled example domain at `examples/data/bow_at_banff_lumped/`
+(~870 KB: lumped Bow River at Banff catchment with ERA5 forcing for May–June 2004).
+After installation, the notebook `examples/summa_ewatercycle_demo.ipynb` runs
+end-to-end against this domain with no extra setup.
 
 ## Usage
 
 ```python
-from ewatercycle.models import SUMMA
-from ewatercycle.parameter_sets import ParameterSet
+from ewatercycle.base.parameter_set import ParameterSet
+from ewatercycle.models import sources
 
-from ewatercycle_summa.forcing import SUMMAForcing
+# Discover the SUMMA model class from eWaterCycle's registry
+SUMMA = sources["SUMMA"]
 
-# Point to pre-prepared SUMMA forcing
-forcing = SUMMAForcing(
-    directory="/path/to/forcing",
-    forcing_file="forcing.nc",
-    start_time="2000-01-01T00:00:00Z",
-    end_time="2001-01-01T00:00:00Z",
-)
-
-# Point to SUMMA parameter set (settings, attributes, cold state, etc.)
+# Point to a SUMMA parameter set (settings, attributes, cold state, etc.)
 parameter_set = ParameterSet(
     name="summa_test",
     directory="/path/to/parameter_set",
@@ -37,9 +49,13 @@ parameter_set = ParameterSet(
     target_model="SUMMA",
 )
 
-# Create and run the model
-model = SUMMA(forcing=forcing, parameter_set=parameter_set)
-cfg_file, cfg_dir = model.setup()
+# Forcing paths inside fileManager.txt may be either absolute, or relative to
+# the parameter-set directory. A separate SUMMAForcing object is optional.
+model = SUMMA(parameter_set=parameter_set)
+cfg_file, cfg_dir = model.setup(
+    start_time="2004-06-01 01:00",
+    end_time="2004-06-08 01:00",
+)
 model.initialize(cfg_file)
 
 while model.time < model.end_time:
