@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          pip install setuptools
+          pip install --no-deps ewatercycle pyoos
+          pip install bmipy grpc4bmi pydantic xarray cftime
+          pip install -e ".[generate]" --no-deps
+          pip install pytest
+
+      - name: Run unit tests
+        run: pytest tests/test_model.py -v
+
+      - name: Run domain tests
+        run: |
+          ./scripts/setup_test_domain.sh
+          pytest tests/test_provo_domain.py -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check src/
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build container (smoke test)
+        uses: docker/build-push-action@v6
+        with:
+          context: container/
+          platforms: linux/amd64
+          push: false
+          tags: ghcr.io/darriey/summa-grpc4bmi:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  integration:
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: |
+          pip install setuptools
+          pip install --no-deps ewatercycle pyoos
+          pip install bmipy grpc4bmi remotebmi pydantic xarray cftime netCDF4
+          pip install -e . --no-deps
+          pip install pytest numpy
+
+      - name: Pull SUMMA container
+        run: docker pull ghcr.io/darriey/summa-grpc4bmi:v0.1.0
+
+      - name: Run integration test with bundled domain
+        run: |
+          python -u -c "
+          import tempfile, time
+          from pathlib import Path
+          from ewatercycle.base.parameter_set import ParameterSet
+          from ewatercycle.models import sources
+          import numpy as np
+
+          SUMMA = sources['SUMMA']
+          domain = Path('examples/data/bow_at_banff_lumped')
+          ps = ParameterSet(name='ci_test', directory=domain,
+                            config='settings/SUMMA/fileManager.txt', target_model='SUMMA')
+          model = SUMMA(parameter_set=ps)
+
+          with tempfile.TemporaryDirectory() as td:
+              cfg_file, cfg_dir = model.setup(cfg_dir=td,
+                  start_time='2004-05-01 01:00', end_time='2004-05-02 01:00')
+              model.initialize(cfg_file)
+              for i in range(3):
+                  model.update()
+                  print(f'Step {i+1}: {model.time_as_datetime}')
+              names = model._bmi.get_output_var_names()
+              assert len(names) > 0, 'No output variables'
+              print(f'Output vars: {names[:3]}')
+              model.finalize()
+              print('INTEGRATION TEST: PASSED')
+          "
