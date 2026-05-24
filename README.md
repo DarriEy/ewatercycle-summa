@@ -97,7 +97,7 @@ via a Python subprocess BMI + grpc4bmi:
 
 ```bash
 cd container
-docker build -t ghcr.io/ewatercycle/summa-grpc4bmi:v0.1.0 .
+docker build -t ghcr.io/darriey/summa-grpc4bmi:v0.1.0 .
 ```
 
 The first `update()` call runs the full SUMMA simulation as a subprocess.

@@ -7,10 +7,11 @@ Requires:
   - ewatercycle + ewatercycle-summa installed
   - symfluence installed (for parameter set generation)
   - Docker running (for SUMMA container)
-  - Bow at Banff domain data in SYMFLUENCE_data/
+  - Bow at Banff domain data (set SUMMA_DOMAIN_DIR to the path)
 """
 
 import logging
+import os
 import tempfile
 import time
 from pathlib import Path
@@ -24,7 +25,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger("e2e_example")
 
-BOW = Path("/Users/darri.eythorsson/compHydro/SYMFLUENCE_data/domain_Bow_at_Banff_lumped")
+BOW = Path(
+    os.environ.get(
+        "SUMMA_DOMAIN_DIR",
+        "domain_Bow_at_Banff_lumped",
+    )
+)
 SHP = BOW / "shapefiles/catchment/lumped/snow17_run_1/Bow_at_Banff_lumped_HRUs_GRUS.shp"
 DEM = BOW / "data/attributes/dem/dem.tif"
 SOIL = BOW / "data/attributes/soilclass/domain_Bow_at_Banff_lumped_soil_classes.tif"
