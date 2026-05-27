@@ -97,14 +97,44 @@ def main(cfg: dict):
     if has_lat and has_lon:
         lats = ref_cube.coord("latitude").points
         lons = ref_cube.coord("longitude").points
-        if lats.ndim > 1:
-            lats = lats.flatten()
-            lons = lons.flatten()
-        n_hru = len(lats)
     else:
-        n_hru = 1
         lats = np.array([0.0])
         lons = np.array([0.0])
+
+    # Build a spatial mask from the reference cube to identify valid HRUs.
+    # extract_shape sets cells outside the catchment to NaN/masked, so we
+    # find cells that have at least one valid timestep.
+    ref_data = ref_cube.data
+    if ref_data.ndim > 2:
+        flat_spatial = ref_data.reshape(n_times, -1)
+    elif ref_data.ndim == 2:
+        flat_spatial = ref_data
+    else:
+        flat_spatial = ref_data.reshape(-1, 1)
+
+    if hasattr(flat_spatial, "mask") and flat_spatial.mask is not np.False_:
+        if flat_spatial.mask.ndim == 0:
+            valid_mask = np.ones(flat_spatial.shape[1], dtype=bool)
+        else:
+            valid_mask = ~np.all(flat_spatial.mask, axis=0)
+    else:
+        valid_mask = np.ones(flat_spatial.shape[1], dtype=bool)
+
+    valid_indices = np.where(valid_mask)[0]
+    n_hru = len(valid_indices) if len(valid_indices) > 0 else 1
+
+    if lats.ndim > 1:
+        flat_lats = lats.flatten()
+        flat_lons = lons.flatten()
+    else:
+        lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
+        flat_lats = lat_grid.flatten()
+        flat_lons = lon_grid.flatten()
+
+    hru_lats = flat_lats[valid_indices] if len(valid_indices) > 0 else lats[:1]
+    hru_lons = flat_lons[valid_indices] if len(valid_indices) > 0 else lons[:1]
+
+    logger.info("Spatial grid: %d total cells, %d valid HRUs", len(valid_mask), n_hru)
 
     start_year = time_coord.units.num2date(time_coord.points[0]).year
     end_year = time_coord.units.num2date(time_coord.points[-1]).year
@@ -126,10 +156,10 @@ def main(cfg: dict):
         hru_id[:] = np.arange(1, n_hru + 1)
 
         lat_var = ds.createVariable("latitude", "f8", ("hru",))
-        lat_var[:] = lats.flatten()[:n_hru]
+        lat_var[:] = hru_lats
 
         lon_var = ds.createVariable("longitude", "f8", ("hru",))
-        lon_var[:] = lons.flatten()[:n_hru]
+        lon_var[:] = hru_lons
 
         ds_var = ds.createVariable("data_step", "f8")
         ds_var[:] = float(data_step)
@@ -140,13 +170,14 @@ def main(cfg: dict):
                 data = np.zeros((n_times, n_hru), dtype=np.float64)
             else:
                 cube = cubes[cmor_name]
-                data = cube.data
-                if data.ndim == 1:
-                    data = data.reshape(-1, 1)
-                elif data.ndim > 2:
-                    spatial_size = int(np.prod(data.shape[1:]))
-                    data = data.reshape(n_times, spatial_size)
-                data = data[:, :n_hru].astype(np.float64)
+                raw = cube.data
+                if raw.ndim == 1:
+                    raw = raw.reshape(-1, 1)
+                elif raw.ndim > 2:
+                    raw = raw.reshape(n_times, -1)
+                if hasattr(raw, "filled"):
+                    raw = raw.filled(np.nan)
+                data = raw[:, valid_indices].astype(np.float64)
 
             var = ds.createVariable(
                 summa_name, "f8", ("time", "hru"),
@@ -167,8 +198,8 @@ def main(cfg: dict):
     provenance = {
         "caption": f"SUMMA forcing for {basin}",
         "domains": ["global"],
-        "authors": ["ewatercycle-summa"],
-        "references": ["summa"],
+        "authors": ["unmaintained"],
+        "references": ["acknowledge_project"],
     }
     with ProvenanceLogger(cfg) as provenance_logger:
         provenance_logger.log(str(output_path), provenance)

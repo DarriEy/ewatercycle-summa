@@ -1,3 +1,3 @@
-from ewatercycle_summa.forcing.forcing import SUMMAForcing
+from ewatercycle_summa.forcing.forcing import SUMMAForcing, cmip6_dataset
 
-__all__ = ["SUMMAForcing"]
+__all__ = ["SUMMAForcing", "cmip6_dataset"]
