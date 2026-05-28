@@ -82,7 +82,8 @@ class SummaBmi(Bmi):
         self._step_count: int = 0
         self._initialized: bool = False
 
-        self._current_output: nc.Dataset | None = None
+        self._output_datasets: list[nc.Dataset] = []
+        self._var_to_dataset: dict[str, nc.Dataset] = {}
         self._restart_file: str = "coldState.nc"
 
     def initialize(self, config_file: str) -> None:
@@ -180,8 +181,10 @@ class SummaBmi(Bmi):
                 f"{result.stderr[-300:]}"
             )
 
-        if self._current_output is not None:
-            self._current_output.close()
+        for ds in self._output_datasets:
+            ds.close()
+        self._output_datasets.clear()
+        self._var_to_dataset.clear()
 
         out_files = sorted(step_dir.glob("*.nc"))
         restart_files = [f for f in out_files if "restart" in f.name]
@@ -190,10 +193,11 @@ class SummaBmi(Bmi):
         if restart_files:
             self._restart_file = str(restart_files[-1])
 
-        if output_files:
-            self._current_output = nc.Dataset(str(output_files[0]), "r")
-        else:
-            self._current_output = None
+        for f in output_files:
+            ds = nc.Dataset(str(f), "r")
+            self._output_datasets.append(ds)
+            for var_name in ds.variables:
+                self._var_to_dataset[var_name] = ds
 
         self._current_time = step_end
         self._step_count += 1
@@ -207,9 +211,10 @@ class SummaBmi(Bmi):
             self._run_step()
 
     def finalize(self) -> None:
-        if self._current_output is not None:
-            self._current_output.close()
-            self._current_output = None
+        for ds in self._output_datasets:
+            ds.close()
+        self._output_datasets.clear()
+        self._var_to_dataset.clear()
 
     # -- Info --
 
@@ -220,19 +225,19 @@ class SummaBmi(Bmi):
         return 0
 
     def get_output_item_count(self) -> int:
-        if self._current_output is None:
+        if not self._var_to_dataset:
             return 0
         skip = {"time", "hruId", "gruId", "latitude", "longitude"}
-        return sum(1 for v in self._current_output.variables if v not in skip)
+        return sum(1 for v in self._var_to_dataset if v not in skip)
 
     def get_input_var_names(self) -> Tuple[str, ...]:
         return ()
 
     def get_output_var_names(self) -> Tuple[str, ...]:
-        if self._current_output is None:
+        if not self._var_to_dataset:
             return ()
         skip = {"time", "hruId", "gruId", "latitude", "longitude"}
-        return tuple(v for v in self._current_output.variables if v not in skip)
+        return tuple(v for v in self._var_to_dataset if v not in skip)
 
     # -- Time --
 
@@ -254,8 +259,8 @@ class SummaBmi(Bmi):
     # -- Variable info --
 
     def get_var_type(self, name: str) -> str:
-        if self._current_output and name in self._current_output.variables:
-            dtype = self._current_output.variables[name].dtype
+        if name in self._var_to_dataset:
+            dtype = self._var_to_dataset[name].variables[name].dtype
             if dtype == np.float64:
                 return "float64"
             if dtype == np.float32:
@@ -265,13 +270,13 @@ class SummaBmi(Bmi):
         return "float64"
 
     def get_var_units(self, name: str) -> str:
-        if self._current_output and name in self._current_output.variables:
-            return getattr(self._current_output.variables[name], "units", "-")
+        if name in self._var_to_dataset:
+            return getattr(self._var_to_dataset[name].variables[name], "units", "-")
         return "-"
 
     def get_var_itemsize(self, name: str) -> int:
-        if self._current_output and name in self._current_output.variables:
-            return self._current_output.variables[name].dtype.itemsize
+        if name in self._var_to_dataset:
+            return self._var_to_dataset[name].variables[name].dtype.itemsize
         return 8
 
     def get_var_nbytes(self, name: str) -> int:
@@ -305,13 +310,13 @@ class SummaBmi(Bmi):
         return origin
 
     def get_grid_x(self, grid: int, x: np.ndarray) -> np.ndarray:
-        if self._current_output and "longitude" in self._current_output.variables:
-            x[:] = self._current_output.variables["longitude"][:]
+        if "longitude" in self._var_to_dataset:
+            x[:] = self._var_to_dataset["longitude"].variables["longitude"][:]
         return x
 
     def get_grid_y(self, grid: int, y: np.ndarray) -> np.ndarray:
-        if self._current_output and "latitude" in self._current_output.variables:
-            y[:] = self._current_output.variables["latitude"][:]
+        if "latitude" in self._var_to_dataset:
+            y[:] = self._var_to_dataset["latitude"].variables["latitude"][:]
         return y
 
     def get_grid_z(self, grid: int, z: np.ndarray) -> np.ndarray:
@@ -341,9 +346,9 @@ class SummaBmi(Bmi):
     # -- Get/Set values --
 
     def get_value(self, name: str, dest: np.ndarray) -> np.ndarray:
-        if self._current_output is None or name not in self._current_output.variables:
+        if name not in self._var_to_dataset:
             return dest
-        var = self._current_output.variables[name]
+        var = self._var_to_dataset[name].variables[name]
         if "time" in var.dimensions:
             data = var[-1]
         else:
